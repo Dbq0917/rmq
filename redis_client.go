@@ -15,6 +15,10 @@ type RedisClient interface {
 	LTrim(key string, start, stop int64) error
 	RPopLPush(source, destination string) (value string, err error)
 	RPop(key string) (value string, err error)
+	LIndex(key string, index int64) (value string, err error)
+
+	// scripting
+	Eval(script string, keys []string, args ...interface{}) (int64, error)
 
 	// sets
 	SAdd(key, value string) (total int64, err error)

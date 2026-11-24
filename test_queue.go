@@ -1,6 +1,9 @@
 package rmq
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 type TestQueue struct {
 	name           string
@@ -28,6 +31,23 @@ func (queue *TestQueue) PublishBytes(payload ...[]byte) error {
 		stringifiedBytes[i] = string(b)
 	}
 	return queue.Publish(stringifiedBytes...)
+}
+
+func (queue *TestQueue) PublishWithTTL(_ time.Duration, payload ...string) error {
+	queue.LastDeliveries = append(queue.LastDeliveries, payload...)
+	return nil
+}
+
+func (queue *TestQueue) PublishBytesWithTTL(ttl time.Duration, payload ...[]byte) error {
+	stringifiedBytes := make([]string, len(payload))
+	for i, b := range payload {
+		stringifiedBytes[i] = string(b)
+	}
+	return queue.PublishWithTTL(ttl, stringifiedBytes...)
+}
+
+func (*TestQueue) cleanExpiredHead(time.Time, int64) (int64, error) {
+	return 0, errors.New("not supported")
 }
 
 func (queue *TestQueue) Remove(payload string, count int64, removeFromRejected bool) error {

@@ -155,6 +155,81 @@ func (client *TestRedisClient) RPop(key string) (value string, err error) {
 	return list[len(list)-1], nil
 }
 
+// LIndex returns the element at index index in the list stored at key.
+// The index is zero-based, so 0 means the first element, 1 the second element and so on.
+// Negative indices can be used to designate elements starting at the tail of the list.
+func (client *TestRedisClient) LIndex(key string, index int64) (value string, err error) {
+	client.mx.Lock()
+	defer client.mx.Unlock()
+
+	list, err := client.findList(key)
+	if err != nil {
+		return "", err
+	}
+	if len(list) == 0 {
+		return "", redis.Nil
+	}
+
+	if index < 0 {
+		index += int64(len(list))
+	}
+	if index < 0 || int(index) >= len(list) {
+		return "", redis.Nil
+	}
+
+	return list[index], nil
+}
+
+// Eval is a test double for EVAL. It only implements the head-only expired
+// delivery cleanup script used by the cleaner; any other script fails.
+func (client *TestRedisClient) Eval(script string, keys []string, args ...interface{}) (int64, error) {
+	if script != cleanExpiredHeadScript {
+		return 0, errUnsupportedScript
+	}
+	if len(keys) != 1 || len(args) != 2 {
+		return 0, errUnsupportedScript
+	}
+
+	now, ok := args[0].(int64)
+	if !ok {
+		return 0, errUnsupportedScript
+	}
+
+	limit, ok := args[1].(int64)
+	if !ok {
+		return 0, errUnsupportedScript
+	}
+
+	client.mx.Lock()
+	defer client.mx.Unlock()
+
+	key := keys[0]
+	list, err := client.findList(key)
+	if err != nil || len(list) == 0 {
+		return 0, err
+	}
+
+	var removed int64
+	for removed < limit && len(list) > 0 {
+		index := len(list) - 1
+		envelope := list[index]
+
+		expiresAt, hasExpiration := parseExpiration(envelope)
+		if !hasExpiration || expiresAt.UnixNano() > now {
+			break
+		}
+
+		list = list[:index]
+		removed++
+	}
+
+	if removed > 0 {
+		client.storeList(key, list)
+	}
+
+	return removed, nil
+}
+
 // LLen returns the length of the list stored at key.
 // If key does not exist, it is interpreted as an empty list and 0 is returned.
 // An error is returned when the value stored at key is not a list.

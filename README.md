@@ -485,6 +485,44 @@ See [`example/cleaner`][cleaner.go].
 
 [cleaner.go]: example/cleaner/main.go
 
+### Expired Deliveries And On-Demand Cleaning
+
+Deliveries can be published with a time to live using `PublishWithTTL` (or
+`PublishBytesWithTTL`). The expiration time is stored alongside the payload,
+so existing payloads and queues without a TTL keep working unchanged:
+
+```go
+err := queue.PublishWithTTL(time.Hour, "payload")
+```
+
+Expired deliveries are not removed automatically. Instead of periodically
+scanning whole queues — which takes seconds on a large backlog and occupies
+the connection while consumers are waiting — the cleaner offers an on-demand
+head scan via `CleanExpired(threshold, max)`:
+
+```go
+removed, err := cleaner.CleanExpired(rmq.DefaultExpiryCleanThreshold, rmq.DefaultExpiryCleanMax)
+```
+
+It is cheap and bounded:
+
+- Queues whose `ready` list is shorter than `threshold` are skipped without
+  issuing any scan command.
+- Queues at or above `threshold` are scanned from the head, that is the
+  oldest end consumers read from, only. At most `max` deliveries are
+  inspected per pass and the scan stops at the first delivery which is still
+  valid, so it never walks the whole backlog.
+- The scan runs atomically in a single Lua script and only touches the
+  `ready` list. `unacked` deliveries, consumer cursors and valid messages are
+  never affected.
+
+Non-positive arguments fall back to `DefaultExpiryCleanThreshold` and
+`DefaultExpiryCleanMax`. Call it on the same regular schedule as the regular
+cleaner; nothing happens while the queues are small. See
+[`example/expiration_cleaner`][expiration_cleaner.go].
+
+[expiration_cleaner.go]: example/expiration_cleaner/main.go
+
 ### Header
 
 Redis protocol does not define a specific way to pass additional data like header.

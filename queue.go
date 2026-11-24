@@ -17,6 +17,8 @@ const (
 type Queue interface {
 	Publish(payload ...string) error
 	PublishBytes(payload ...[]byte) error
+	PublishWithTTL(ttl time.Duration, payload ...string) error
+	PublishBytesWithTTL(ttl time.Duration, payload ...[]byte) error
 	SetPushQueue(pushQueue Queue)
 	Remove(payload string, count int64, removeFromRejected bool) error
 	RemoveBytes(payload []byte, count int64, removeFromRejected bool) error
@@ -32,6 +34,9 @@ type Queue interface {
 	ReturnRejected(max int64) (int64, error)
 	Destroy() (readyCount, rejectedCount int64, err error)
 	Drain(count int64) ([]string, error)
+	// cleanExpiredHead removes at most max expired deliveries from the head
+	// (oldest end) of the ready list and returns the number of removals.
+	cleanExpiredHead(now time.Time, max int64) (int64, error)
 
 	// internals
 	// used in cleaner
@@ -108,7 +113,32 @@ func (queue *redisQueue) String() string {
 // Publish adds a delivery with the given payload to the queue
 // returns how many deliveries are in the queue afterwards
 func (queue *redisQueue) Publish(payload ...string) error {
+	if len(payload) == 0 {
+		return nil
+	}
 	_, err := queue.redisClient.LPush(queue.readyKey, payload...)
+	return err
+}
+
+// PublishWithTTL adds deliveries which expire after ttl. Expired deliveries
+// stay in the ready list until an on-demand cleaning pass removes them, see
+// Cleaner.CleanExpired. A non-positive ttl means the deliveries never expire
+// and is equivalent to calling Publish.
+func (queue *redisQueue) PublishWithTTL(ttl time.Duration, payload ...string) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	if ttl <= 0 {
+		return queue.Publish(payload...)
+	}
+
+	expiresAt := nowFunc().Add(ttl)
+	envelopes := make([]string, len(payload))
+	for i, p := range payload {
+		envelopes[i] = withExpiration(p, expiresAt)
+	}
+
+	_, err := queue.redisClient.LPush(queue.readyKey, envelopes...)
 	return err
 }
 
@@ -119,6 +149,15 @@ func (queue *redisQueue) PublishBytes(payload ...[]byte) error {
 		stringifiedBytes[i] = string(b)
 	}
 	return queue.Publish(stringifiedBytes...)
+}
+
+// PublishBytesWithTTL is the byte slice variant of PublishWithTTL.
+func (queue *redisQueue) PublishBytesWithTTL(ttl time.Duration, payload ...[]byte) error {
+	stringifiedBytes := make([]string, len(payload))
+	for i, b := range payload {
+		stringifiedBytes[i] = string(b)
+	}
+	return queue.PublishWithTTL(ttl, stringifiedBytes...)
 }
 
 // Remove elements with specific value from the queue (WARN: this operation is pretty slow with O(N+M) complexity where N is length of the queue and M is number of removed elements)
@@ -244,7 +283,9 @@ func (queue *redisQueue) consumeBatch() error {
 
 func (queue *redisQueue) newDelivery(payload string) (Delivery, error) {
 	rd := &redisDelivery{
-		ctx:         queue.ackCtx,
+		ctx: queue.ackCtx,
+		// payload keeps the raw stored value (including any expiration
+		// envelope) so Ack() can remove it from the unacked list by value.
 		payload:     payload,
 		unackedKey:  queue.unackedKey,
 		rejectedKey: queue.rejectedKey,
@@ -254,7 +295,10 @@ func (queue *redisQueue) newDelivery(payload string) (Delivery, error) {
 	}
 
 	var err error
-	rd.header, rd.clearPayload, err = ExtractHeaderAndPayload(payload)
+	// Drop the expiration envelope before header extraction so headers and
+	// user payloads stay visible to consumers. Expired deliveries which are
+	// consumed before the cleaner gets to them are still delivered.
+	rd.header, rd.clearPayload, err = ExtractHeaderAndPayload(stripExpiration(payload))
 	if err == nil {
 		return rd, nil
 	}
@@ -504,6 +548,22 @@ func (queue *redisQueue) move(from, to string, max int64) (n int64, error error)
 		}
 	}
 	return n, nil
+}
+
+// cleanExpiredHead runs the head-only expiration scan against the ready list.
+// It only touches the oldest end of the ready list; unacked deliveries and
+// active consumers are not affected.
+func (queue *redisQueue) cleanExpiredHead(now time.Time, max int64) (int64, error) {
+	if max <= 0 {
+		return 0, nil
+	}
+
+	return queue.redisClient.Eval(
+		cleanExpiredHeadScript,
+		[]string{queue.readyKey},
+		now.UnixNano(),
+		max,
+	)
 }
 
 // Drain removes and returns 'count' elements from the queue. In case of an error,

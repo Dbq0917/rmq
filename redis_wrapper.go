@@ -45,6 +45,18 @@ func (wrapper RedisWrapper) RPop(key string) (value string, err error) {
 	return wrapper.rawClient.RPop(context.TODO(), key).Result()
 }
 
+func (wrapper RedisWrapper) LIndex(key string, index int64) (value string, err error) {
+	value, err = wrapper.rawClient.LIndex(context.TODO(), key, index).Result()
+	if err == redis.Nil {
+		return value, ErrorNotFound
+	}
+	return value, err
+}
+
+func (wrapper RedisWrapper) Eval(script string, keys []string, args ...interface{}) (int64, error) {
+	return wrapper.rawClient.Eval(context.TODO(), script, keys, args...).Int64()
+}
+
 func (wrapper RedisWrapper) RPopLPush(source, destination string) (value string, err error) {
 	value, err = wrapper.rawClient.RPopLPush(context.TODO(), source, destination).Result()
 	// println("RPopLPush", source, destination, value, err)
