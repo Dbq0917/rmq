@@ -238,6 +238,58 @@ func (client *TestRedisClient) LRem(key string, count int64, value string) (affe
 	return affected, nil
 }
 
+func (client *TestRedisClient) LRemMulti(key string, values []string) ([]int64, error) {
+	client.mx.Lock()
+	defer client.mx.Unlock()
+
+	list, err := client.findList(key)
+	if err != nil {
+		return nil, err
+	}
+
+	affected := make([]int64, len(values))
+	for i, value := range values {
+		for index, item := range list {
+			if item != value {
+				continue
+			}
+			list = append(list[:index], list[index+1:]...)
+			affected[i] = 1
+			break
+		}
+	}
+
+	client.storeList(key, list)
+	return affected, nil
+}
+
+func (client *TestRedisClient) MoveListItem(source, destination, value string) (int64, error) {
+	client.mx.Lock()
+	defer client.mx.Unlock()
+
+	sourceList, err := client.findList(source)
+	if err != nil {
+		return 0, err
+	}
+	destinationList, err := client.findList(destination)
+	if err != nil {
+		return 0, err
+	}
+
+	for index, item := range sourceList {
+		if item != value {
+			continue
+		}
+		sourceList = append(sourceList[:index], sourceList[index+1:]...)
+		destinationList = append([]string{value}, destinationList...)
+		client.storeList(source, sourceList)
+		client.storeList(destination, destinationList)
+		return 1, nil
+	}
+
+	return 0, nil
+}
+
 // LTrim trims an existing list so that it will contain only the specified range of elements specified.
 // Both start and stop are zero-based indexes, where 0 is the first element of the list (the head),
 // 1 the next element and so on. For example: LTRIM foobar 0 2 will modify the list stored

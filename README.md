@@ -327,8 +327,10 @@ func (consumer *MyBatchConsumer) Consume(batch rmq.Deliveries) {
 
 Note that `batch.Ack()` acknowledges all deliveries in the batch. It's also
 possible to ack some of the deliveries and reject the rest. It uses the same
-retry mechanism per delivery as discussed above. If some of the deliveries
-continue to fail to ack when consuming gets stopped (see below), then
+retry mechanism per delivery as discussed above. When using the built-in Redis
+client, all successful deliveries in a batch are acknowledged in a single Redis
+round trip. If some of the deliveries continue to fail to ack when consuming
+gets stopped (see below), then
 `batch.Ack()` will return an error map `map[int]error`. For each entry in this
 map the key will be the index of the delivery which failed to ack and the value
 will be the error it ran into. That way you can map the errors back to the

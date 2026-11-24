@@ -7,6 +7,24 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const (
+	lremMultiScript = `
+local results = {}
+for i = 1, #ARGV do
+	results[i] = redis.call("LREM", KEYS[1], 1, ARGV[i])
+end
+return results
+`
+
+	moveListItemScript = `
+local removed = redis.call("LREM", KEYS[1], 1, ARGV[1])
+if removed > 0 then
+	redis.call("LPUSH", KEYS[2], ARGV[1])
+end
+return removed
+`
+)
+
 type RedisWrapper struct {
 	rawClient redis.Cmdable
 }
@@ -34,6 +52,55 @@ func (wrapper RedisWrapper) LLen(key string) (affected int64, err error) {
 
 func (wrapper RedisWrapper) LRem(key string, count int64, value string) (affected int64, err error) {
 	return wrapper.rawClient.LRem(context.TODO(), key, int64(count), value).Result()
+}
+
+func (wrapper RedisWrapper) LRemMulti(key string, values []string) (affected []int64, err error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+
+	args := make([]interface{}, len(values))
+	for i, value := range values {
+		args[i] = value
+	}
+
+	result, err := wrapper.rawClient.Eval(context.TODO(), lremMultiScript, []string{key}, args...).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	items, ok := result.([]interface{})
+	if !ok {
+		return nil, ErrorNotFound
+	}
+
+	affected = make([]int64, len(items))
+	for i, item := range items {
+		count, ok := item.(int64)
+		if !ok {
+			return nil, ErrorNotFound
+		}
+		affected[i] = count
+	}
+	return affected, nil
+}
+
+func (wrapper RedisWrapper) MoveListItem(source, destination, value string) (int64, error) {
+	result, err := wrapper.rawClient.Eval(
+		context.TODO(),
+		moveListItemScript,
+		[]string{source, destination},
+		value,
+	).Result()
+	if err != nil {
+		return 0, err
+	}
+
+	removed, ok := result.(int64)
+	if !ok {
+		return 0, ErrorNotFound
+	}
+	return removed, nil
 }
 
 func (wrapper RedisWrapper) LTrim(key string, start, stop int64) error {

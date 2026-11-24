@@ -18,6 +18,9 @@ func (deliveries Deliveries) Payloads() []string {
 // functions with retry, see comments in delivery.go (recommended)
 
 func (deliveries Deliveries) Ack() (errMap map[int]error) {
+	if errMap, ok := deliveries.ackBatch(); ok {
+		return errMap
+	}
 	return deliveries.each(Delivery.Ack)
 }
 
@@ -43,4 +46,51 @@ func (deliveries Deliveries) each(
 		}
 	}
 	return errMap
+}
+
+func (deliveries Deliveries) ackBatch() (errMap map[int]error, ok bool) {
+	if len(deliveries) == 0 {
+		return nil, true
+	}
+
+	first, ok := deliveries[0].(*redisDelivery)
+	if !ok {
+		return nil, false
+	}
+	client, ok := first.redisClient.(multiRemover)
+	if !ok {
+		return nil, false
+	}
+
+	payloads := make([]string, len(deliveries))
+	for i, delivery := range deliveries {
+		redisDelivery, ok := delivery.(*redisDelivery)
+		if !ok || redisDelivery.unackedKey != first.unackedKey {
+			return nil, false
+		}
+		payloads[i] = redisDelivery.payload
+	}
+
+	counts, err := client.LRemMulti(first.unackedKey, payloads)
+	if err != nil || len(counts) != len(payloads) {
+		return nil, false
+	}
+
+	for i, count := range counts {
+		if count == 0 {
+			if errMap == nil {
+				errMap = map[int]error{}
+			}
+			errMap[i] = ErrorNotFound
+		}
+	}
+	return errMap, true
+}
+
+type multiRemover interface {
+	LRemMulti(key string, values []string) ([]int64, error)
+}
+
+type listMover interface {
+	MoveListItem(source, destination, value string) (int64, error)
 }

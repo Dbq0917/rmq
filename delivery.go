@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -91,7 +92,35 @@ func (delivery *redisDelivery) Push() error {
 
 func (delivery *redisDelivery) move(key string) error {
 	errorCount := 0
+	useAtomicMove := true
 	for {
+		if mover, ok := delivery.redisClient.(listMover); useAtomicMove && ok &&
+			redisKeysShareSlot(delivery.unackedKey, key) {
+			count, err := mover.MoveListItem(delivery.unackedKey, key, delivery.payload)
+			if err == nil {
+				if count == 0 {
+					return ErrorNotFound
+				}
+				return nil
+			}
+			if redisScriptUnsupported(err) {
+				useAtomicMove = false
+			} else {
+				errorCount++
+				select { // try to add error to channel, but don't block
+				case delivery.errChan <- &DeliveryError{Delivery: delivery, RedisErr: err, Count: errorCount}:
+				default:
+				}
+
+				if err := delivery.ctx.Err(); err != nil {
+					return ErrorConsumingStopped
+				}
+
+				time.Sleep(time.Second)
+				continue
+			}
+		}
+
 		_, err := delivery.redisClient.LPush(key, delivery.payload)
 		if err == nil { // success
 			break
@@ -113,6 +142,37 @@ func (delivery *redisDelivery) move(key string) error {
 	}
 
 	return delivery.Ack()
+}
+
+func redisScriptUnsupported(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unknown command") ||
+		strings.Contains(message, "not supported") ||
+		strings.Contains(message, "crossslot")
+}
+
+func redisKeysShareSlot(first, second string) bool {
+	firstTag, firstTagged := redisHashTag(first)
+	secondTag, secondTagged := redisHashTag(second)
+	if firstTagged && secondTagged {
+		return firstTag == secondTag
+	}
+	return !firstTagged && !secondTagged
+}
+
+func redisHashTag(key string) (string, bool) {
+	start := strings.IndexByte(key, '{')
+	if start == -1 {
+		return "", false
+	}
+	end := strings.IndexByte(key[start+1:], '}')
+	if end == -1 {
+		return "", false
+	}
+	if end == 0 {
+		return "", false
+	}
+	return key[start+1 : start+1+end], true
 }
 
 // lower level functions which don't retry but just return the first error

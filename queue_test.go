@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -455,6 +456,93 @@ func TestBatch(t *testing.T) {
 		assert.Empty(t, errMap)
 	})
 	assert.NoError(t, err)
+}
+
+func TestBatchMiddleFailureRedeliversOnlyFailedDelivery(t *testing.T) {
+	redisOptions, closer := testRedis(t)
+	defer closer()
+
+	connection, err := OpenConnectionWithRedisOptions("batch-middle-conn", redisOptions, nil)
+	require.NoError(t, err)
+	queue, err := connection.OpenQueue("batch-middle-q")
+	require.NoError(t, err)
+	_, err = queue.PurgeRejected()
+	require.NoError(t, err)
+	_, err = queue.PurgeReady()
+	require.NoError(t, err)
+
+	const (
+		deliveryCount = 50
+		prefetchLimit = 50
+		failedPayload = "batch-middle-fail"
+	)
+
+	for i := 0; i < deliveryCount; i++ {
+		payload := fmt.Sprintf("batch-middle-%02d", i)
+		if i == deliveryCount/2 {
+			payload = failedPayload
+		}
+		require.NoError(t, queue.Publish(payload))
+	}
+
+	require.NoError(t, queue.StartConsuming(prefetchLimit, time.Millisecond))
+
+	var (
+		lock     sync.Mutex
+		received = map[string]int{}
+	)
+	_, err = queue.AddBatchConsumerFunc("batch-middle", deliveryCount, 10*time.Millisecond, func(batch Deliveries) {
+		for _, delivery := range batch {
+			payload := delivery.Payload()
+
+			lock.Lock()
+			failedBefore := received[payload] > 0
+			lock.Unlock()
+
+			if payload == failedPayload && !failedBefore {
+				assert.NoError(t, delivery.Reject())
+			} else {
+				assert.NoError(t, delivery.Ack())
+			}
+
+			lock.Lock()
+			received[payload]++
+			lock.Unlock()
+		}
+	})
+	require.NoError(t, err)
+
+	eventuallyUnacked(t, queue, 0)
+	eventuallyRejected(t, queue, 1)
+
+	returned, err := queue.ReturnRejected(1)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), returned)
+
+	eventuallyUnacked(t, queue, 0)
+	eventuallyRejected(t, queue, 0)
+	assert.Eventually(t, func() bool {
+		lock.Lock()
+		defer lock.Unlock()
+
+		total := 0
+		for _, count := range received {
+			total += count
+		}
+		return total == deliveryCount+1
+	}, 10*time.Second, 2*time.Millisecond)
+
+	lock.Lock()
+	assert.Equal(t, 2, received[failedPayload])
+	for payload, count := range received {
+		if payload != failedPayload {
+			assert.Equal(t, 1, count, "payload %s was delivered more than once", payload)
+		}
+	}
+	lock.Unlock()
+
+	<-queue.StopConsuming()
+	assert.NoError(t, connection.stopHeartbeat())
 }
 
 func TestReturnRejected(t *testing.T) {
