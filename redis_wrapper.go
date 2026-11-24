@@ -2,6 +2,7 @@ package rmq
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -22,6 +23,29 @@ func (wrapper RedisWrapper) Del(key string) (affected int64, err error) {
 
 func (wrapper RedisWrapper) TTL(key string) (ttl time.Duration, err error) {
 	return wrapper.rawClient.TTL(context.TODO(), key).Result()
+}
+
+func (wrapper RedisWrapper) Exists(key string) (int64, error) {
+	return wrapper.rawClient.Exists(context.TODO(), key).Result()
+}
+
+func (wrapper RedisWrapper) ZAdd(key string, member string, score float64) error {
+	return wrapper.rawClient.ZAdd(context.TODO(), key, redis.Z{Score: score, Member: member}).Err()
+}
+
+func (wrapper RedisWrapper) ZRange(key string, start int64, stop int64) ([]string, error) {
+	return wrapper.rawClient.ZRange(context.TODO(), key, start, stop).Result()
+}
+
+func (wrapper RedisWrapper) ZRangeByScore(key string, min float64, max float64) ([]string, error) {
+	return wrapper.rawClient.ZRangeByScore(context.TODO(), key, &redis.ZRangeBy{
+		Min: strconv.FormatFloat(min, 'f', -1, 64),
+		Max: strconv.FormatFloat(max, 'f', -1, 64),
+	}).Result()
+}
+
+func (wrapper RedisWrapper) ZRem(key string, member string) (int64, error) {
+	return wrapper.rawClient.ZRem(context.TODO(), key, member).Result()
 }
 
 func (wrapper RedisWrapper) LPush(key string, value ...string) (total int64, err error) {

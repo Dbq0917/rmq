@@ -23,7 +23,27 @@ func (cleaner *Cleaner) Clean() (returned int64, err error) {
 		return 0, err
 	}
 
+	staleCandidates, indexed, err := cleaner.connection.getStaleConnectionCandidates()
+	if err != nil {
+		return 0, err
+	}
+
+	candidates := make(map[string]struct{}, len(connectionNames))
+	if !indexed {
+		for _, connectionName := range connectionNames {
+			candidates[connectionName] = struct{}{}
+		}
+	} else {
+		for _, connectionName := range staleCandidates {
+			candidates[connectionName] = struct{}{}
+		}
+	}
+
 	for _, connectionName := range connectionNames {
+		if _, ok := candidates[connectionName]; !ok {
+			continue
+		}
+
 		hijackedConnection := cleaner.connection.hijackConnection(connectionName)
 		switch err := hijackedConnection.checkHeartbeat(); err {
 		case nil: // active connection

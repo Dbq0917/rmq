@@ -4,6 +4,7 @@ import "strings"
 
 const (
 	connectionsKey                       = "rmq::connections"                                           // Set of connection names
+	connectionHeartbeatsKey              = "{rmq::connections}::heartbeats"                             // Sorted set of connection names by heartbeat expiration time, hash-tagged for Redis Cluster
 	connectionHeartbeatTemplate          = "rmq::connection::{connection}::heartbeat"                   // expires after {connection} died
 	connectionQueuesTemplate             = "rmq::connection::{connection}::queues"                      // Set of queues consumers of {connection} are consuming
 	connectionQueueConsumersBaseTemplate = "rmq::connection::{connection}::queue::[{queue}]::consumers" // Set of all consumers from {connection} consuming from {queue}

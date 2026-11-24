@@ -32,6 +32,7 @@ type Connection interface {
 	// used in cleaner
 	checkHeartbeat() error
 	getConnections() ([]string, error)
+	getStaleConnectionCandidates() ([]string, bool, error)
 	hijackConnection(name string) Connection
 	closeStaleConnection() error
 	getConsumingQueues() ([]string, error)
@@ -41,6 +42,14 @@ type Connection interface {
 	stopHeartbeat() error
 	flushDb() error
 	unlistAllQueues() error
+}
+
+type heartbeatIndexClient interface {
+	Exists(key string) (int64, error)
+	ZAdd(key string, member string, score float64) error
+	ZRange(key string, start int64, stop int64) ([]string, error)
+	ZRangeByScore(key string, min float64, max float64) ([]string, error)
+	ZRem(key string, member string) (int64, error)
 }
 
 // Connection is the entry point. Use a connection to access queues, consumers and deliveries
@@ -130,7 +139,16 @@ func openConnection(tag string, redisClient RedisClient, useRedisHashTags bool, 
 }
 
 func (connection *redisConnection) updateHeartbeat() error {
-	return connection.redisClient.Set(connection.heartbeatKey, "1", heartbeatDuration)
+	if err := connection.redisClient.Set(connection.heartbeatKey, "1", heartbeatDuration); err != nil {
+		return err
+	}
+
+	if indexClient, ok := connection.redisClient.(heartbeatIndexClient); ok {
+		expiresAt := float64(time.Now().Add(heartbeatDuration).Unix())
+		return indexClient.ZAdd(connectionHeartbeatsKey, connection.Name, expiresAt)
+	}
+
+	return nil
 }
 
 // heartbeat keeps the heartbeat key alive
@@ -275,6 +293,48 @@ func (connection *redisConnection) checkHeartbeat() error {
 	return nil
 }
 
+func (connection *redisConnection) getStaleConnectionCandidates() ([]string, bool, error) {
+	indexClient, ok := connection.redisClient.(heartbeatIndexClient)
+	if !ok {
+		return nil, false, nil
+	}
+
+	indexCount, err := indexClient.Exists(connectionHeartbeatsKey)
+	if err != nil {
+		return nil, true, err
+	}
+	if indexCount == 0 {
+		return nil, false, nil
+	}
+
+	indexedConnections, err := indexClient.ZRange(connectionHeartbeatsKey, 0, -1)
+	if err != nil {
+		return nil, true, err
+	}
+
+	allConnections, err := connection.getConnections()
+	if err != nil {
+		return nil, true, err
+	}
+
+	// Connections created by older versions do not maintain this index. Fall
+	// back to checking every heartbeat until the rolling upgrade has completed.
+	indexedConnectionSet := make(map[string]struct{}, len(indexedConnections))
+	for _, connectionName := range indexedConnections {
+		indexedConnectionSet[connectionName] = struct{}{}
+	}
+
+	for _, connectionName := range allConnections {
+		if _, ok := indexedConnectionSet[connectionName]; !ok {
+			return nil, false, nil
+		}
+	}
+
+	now := float64(time.Now().Unix())
+	connectionNames, err := indexClient.ZRangeByScore(connectionHeartbeatsKey, 0, now)
+	return connectionNames, true, err
+}
+
 // getConnections returns a list of all open connections
 func (connection *redisConnection) getConnections() ([]string, error) {
 	return connection.redisClient.SMembers(connectionsKey)
@@ -308,6 +368,12 @@ func (connection *redisConnection) closeStaleConnection() error {
 	// have been consuming from any queue, in which case this key doesn't exist
 	if _, err = connection.redisClient.Del(connection.queuesKey); err != nil {
 		return err
+	}
+
+	if indexClient, ok := connection.redisClient.(heartbeatIndexClient); ok {
+		if _, err = indexClient.ZRem(connectionHeartbeatsKey, connection.Name); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -358,6 +424,13 @@ func (connection *redisConnection) stopHeartbeat() error {
 	if count == 0 { // heartbeat key didn't exist
 		return ErrorNotFound
 	}
+
+	if indexClient, ok := connection.redisClient.(heartbeatIndexClient); ok {
+		if err := indexClient.ZAdd(connectionHeartbeatsKey, connection.Name, 0); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

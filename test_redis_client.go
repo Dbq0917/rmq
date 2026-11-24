@@ -13,6 +13,7 @@ import (
 type TestRedisClient struct {
 	store sync.Map
 	ttl   sync.Map
+	zsets sync.Map
 	mx    sync.Mutex
 }
 
@@ -108,6 +109,95 @@ func (client *TestRedisClient) TTL(key string) (ttl time.Duration, err error) {
 	}
 
 	return -2, nil
+}
+
+func (client *TestRedisClient) Exists(key string) (int64, error) {
+	client.mx.Lock()
+	defer client.mx.Unlock()
+
+	if _, found := client.store.Load(key); found {
+		return 1, nil
+	}
+	if _, found := client.zsets.Load(key); found {
+		return 1, nil
+	}
+
+	return 0, nil
+}
+
+func (client *TestRedisClient) ZAdd(key string, member string, score float64) error {
+	client.mx.Lock()
+	defer client.mx.Unlock()
+
+	sortedSet, _ := client.zsets.LoadOrStore(key, make(map[string]float64))
+	sortedSet.(map[string]float64)[member] = score
+	return nil
+}
+
+func (client *TestRedisClient) ZRange(key string, start int64, stop int64) ([]string, error) {
+	client.mx.Lock()
+	defer client.mx.Unlock()
+
+	storedSet, found := client.zsets.Load(key)
+	if !found {
+		return []string{}, nil
+	}
+
+	sortedSet := storedSet.(map[string]float64)
+	members := make([]string, 0, len(sortedSet))
+	for member := range sortedSet {
+		members = append(members, member)
+	}
+
+	if start == 0 && stop == -1 {
+		return members, nil
+	}
+	if start < 0 || stop < 0 || start >= int64(len(members)) || start > stop {
+		return []string{}, nil
+	}
+	if stop >= int64(len(members)) {
+		stop = int64(len(members) - 1)
+	}
+
+	return members[start : stop+1], nil
+}
+
+func (client *TestRedisClient) ZRangeByScore(key string, min float64, max float64) ([]string, error) {
+	client.mx.Lock()
+	defer client.mx.Unlock()
+
+	storedSet, found := client.zsets.Load(key)
+	if !found {
+		return []string{}, nil
+	}
+
+	sortedSet := storedSet.(map[string]float64)
+	members := make([]string, 0)
+	for member, score := range sortedSet {
+		if score >= min && score <= max {
+			members = append(members, member)
+		}
+	}
+
+	return members, nil
+}
+
+func (client *TestRedisClient) ZRem(key string, member string) (int64, error) {
+	client.mx.Lock()
+	defer client.mx.Unlock()
+
+	storedSet, found := client.zsets.Load(key)
+	if !found {
+		return 0, nil
+	}
+
+	sortedSet := storedSet.(map[string]float64)
+	if _, found := sortedSet[member]; !found {
+		return 0, nil
+	}
+
+	delete(sortedSet, member)
+	return 1, nil
 }
 
 // LPush inserts the specified value at the head of the list stored at key.
@@ -370,6 +460,7 @@ func (client *TestRedisClient) SRem(key, value string) (affected int64, err erro
 func (client *TestRedisClient) FlushDb() error {
 	client.store = *new(sync.Map)
 	client.ttl = *new(sync.Map)
+	client.zsets = *new(sync.Map)
 	return nil
 }
 
